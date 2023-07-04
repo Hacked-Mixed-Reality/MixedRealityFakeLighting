@@ -1,0 +1,124 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform texture2d light_source;
+uniform float saturation;
+uniform float intensity;
+uniform int partitions;
+uniform int sub_divisions;
+uniform float contrast;
+
+sampler_state def_sampler {
+    Filter   = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+struct VertInOut {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+struct VertOut {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VertOut VSDefault(VertInOut vert_in)
+{
+    VertOut vert_out;
+    vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+    vert_out.uv  = vert_in.uv;
+    return vert_out;
+}
+
+float4 multisampler(float2 uv, float partitions, float subDivisions)
+{
+	float4 color = float4(0.0, 0.0, 0.0, 0.0);
+	
+	float subPartitions = 1 / (partitions * subDivisions * 2);
+	int steps = 0;
+	
+	for (int x = -subDivisions + 1; x < subDivisions +1; x++)
+	{
+		for (int y = -subDivisions + 1; y < subDivisions +1; y++)
+		{
+			color += light_source.Sample(def_sampler, float2(uv.x + (x * subDivisions * subPartitions), uv.y + (y * subDivisions * subPartitions)));
+			steps++;
+		}
+	}
+	
+	color /= steps;
+	return color;
+}
+
+
+float4 getAverageColor(float2 uv)
+{
+	//Method: Cut the image up in to a grid of i rectangles and sample around that grid (j+1)^2 times, where
+	// i is partitions and j is sub_divisions. Linerarly interpolate between these points
+
+	float2 uvA = float2(floor(uv.x * partitions), floor(uv.y * partitions));
+	float2 uvB = float2(uvA.x + 1, uvA.y);
+	float2 uvC = float2(uvA.x + 1, uvA.y + 1);
+	float2 uvD = float2(uvA.x, uvA.y + 1);
+
+	float lerpX = (uv.x * partitions) - uvA.x;
+	float lerpY = (uv.y * partitions) - uvA.y;
+
+	uvA = uvA / partitions;
+	uvB = uvB / partitions;
+	uvC = uvC / partitions;
+	uvD = uvD / partitions;
+
+	float4 a = multisampler(uvA, partitions, sub_divisions);
+	float4 b = multisampler(uvB, partitions, sub_divisions);
+	float4 c = multisampler(uvC, partitions, sub_divisions);
+	float4 d = multisampler(uvD, partitions, sub_divisions);
+
+	float4 ab = lerp(a,b,lerpX);
+	float4 dc = lerp(d,c,lerpX);
+	float4 abdc = lerp(ab,dc,lerpY);
+
+	return abdc;
+}
+
+float4 desaturate(float4 inputPixel, float saturationInput)
+{
+	float3 luminanceWeights = float3(0.299,0.587,0.114);
+    float luminance = dot(inputPixel, luminanceWeights);
+    float4 dstPixel = lerp(luminance, inputPixel, saturationInput);
+	return dstPixel;
+}
+
+float4 PSDrawBare(VertOut vert_in) : SV_TARGET
+{
+    //Input image
+	float4 sourceColor = image.Sample(def_sampler, vert_in.uv);
+	
+	//Get blurred light source image
+	float4 averageColor = getAverageColor(vert_in.uv);
+
+	//Apply saturation multiplier
+	averageColor = desaturate(averageColor, saturation);
+
+    //Apply blending operation 
+    float4 finalColor = lerp(sourceColor, averageColor, intensity);
+	
+	//Apply contrast correction
+	finalColor.rgb = ((finalColor.rgb - 0.5f) * max((intensity/4) + contrast, 0)) + 0.5f;
+	
+	//Premultiply alpha
+	finalColor.rgb *= sourceColor.a;
+	finalColor.a = sourceColor.a;
+	
+    return finalColor; 
+}
+
+technique Draw
+{
+    pass
+    {
+        vertex_shader = VSDefault(vert_in);
+        pixel_shader  = PSDrawBare(vert_in);
+    }
+}
